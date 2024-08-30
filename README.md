@@ -50,7 +50,10 @@ Open and run the [`download_dataset.ipynb`](download_dataset.ipynb) notebook to 
 
 ### 2. Preprocess the Dataset
 
-Open and run the [`preprocess.ipynb`](preprocess.ipynb) notebook to preprocess the dataset. This notebook will:
+Open and run the [`preprocess.ipynb`](preprocess.ipynb) notebook to preprocess the dataset.
+Edit the MACHINE variable in the first cell to run it once for BrushlessMotor and once for RoboticArm.
+
+ This notebook will:
 - Load the raw dataset and the metadata related to it;
 - divide the dataset into train and test set based on the information contained in the metadata,
 - Perform necessary preprocessing steps, namely windowing;
