@@ -79,7 +79,7 @@ class AutoencoderFC(nn.Module):
             training_loss_epoch_sensor = np.zeros(len(self.window_lengths))
 
             # Loop over each batch from the data loader
-            for batch_idx, x_batch in enumerate(train_data_loader):
+            for batch_idx, (x_batch, _) in enumerate(train_data_loader):
                 x_batch = torch.concat(
                     # Flatten and concatenate batch data
                     [x.flatten(1) for x in x_batch], axis=1)
@@ -176,7 +176,7 @@ class AutoencoderFC(nn.Module):
             valid_loss_epoch_sensor = np.zeros(len(self.window_lengths))
 
             # Iterate over each batch in the provided data loader
-            for batch_idx, x_batch in enumerate(data_loader):
+            for batch_idx, (x_batch, _) in enumerate(data_loader):
                 # Flatten and concatenate batch data for processing
                 x_batch = torch.concat(
                     [x.flatten(1) for x in x_batch], axis=1)
@@ -226,7 +226,7 @@ class AutoencoderFC(nn.Module):
 
         # Set model to evaluation mode
         self.eval()
-        for batch_idx, x_batch in enumerate(test_data_loader):
+        for batch_idx, (x_batch, _) in enumerate(test_data_loader):
             # Flatten and concatenate input data for processing
             x_batch = torch.concat([x.flatten(1) for x in x_batch], axis=1)
 
@@ -274,7 +274,7 @@ class AutoencoderFC(nn.Module):
             np.concatenate(total_loss, axis=0))
 
         # Combine anomaly scores DataFrame with Y_test for analysis
-        Y_test_combined = pd.concat([Y_test, anomaly_scores_df], axis=1)
+        Y_test_combined = pd.concat([pd.Series(Y_test), anomaly_scores_df], axis=1)
 
         # Group by segment_id and aggregate as specified
         Y_test_grouped = utilities.group_by_segment_id(
