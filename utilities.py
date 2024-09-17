@@ -231,46 +231,6 @@ def load_dataset(train_path, test_path, label_names, sensors):
 
     return X_train_raw, Y_train_raw, X_test, Y_test
 
-
-class CustomDataset(Dataset):
-    """
-    Custom Dataset for handling multi-sensor data.
-
-    Attributes:
-    X (list): List of numpy arrays, where each array contains data from a different sensor.
-    """
-
-    def __init__(self, X):
-        """
-        Initialize the CustomDataset with sensor data.
-
-        Parameters:
-        X (list): List of numpy arrays, where each array contains data from a different sensor.
-        """
-        self.X = X
-
-    def __len__(self):
-        """
-        Return the length of the dataset.
-
-        Returns:
-        int: Length of the dataset, which is the length of the first sensor's data.
-        """
-        return len(self.X[0])
-
-    def __getitem__(self, idx):
-        """
-        Retrieve a sample from the dataset at the specified index.
-
-        Parameters:
-        idx (int): Index of the sample to retrieve.
-
-        Returns:
-        list: A list of samples from each sensor at the specified index.
-        """
-        return [x[idx] for x in self.X]
-
-
 def standardize_window(data):
     """
     Standardize the data within each window for each channel.
@@ -344,7 +304,8 @@ def min_max_scale(data, min_val, max_val):
     return (data - min_val) / (max_val - min_val)
 
 
-def normalize_data(X_train, X_valid, X_test, normalisation):
+
+def normalize_data_old(X_train, X_valid, X_test, normalisation):
     """
     Normalize the training, validation, and test datasets using the specified normalization method.
 
