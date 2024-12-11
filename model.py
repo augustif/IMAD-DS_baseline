@@ -6,7 +6,7 @@ import torch.nn as nn
 
 # custom libraries
 import utilities
-
+import os
 
 class AutoencoderFC(nn.Module):
     def __init__(self, window_lengths, num_channels, params, sensors):
@@ -19,6 +19,44 @@ class AutoencoderFC(nn.Module):
         self.params = params
         self.encoder = self.build_encoder()
         self.decoder = self.build_decoder()
+
+        self.checkpoint_path = params['checkpoints_path']
+        os.makedirs(self.checkpoint_path, exist_ok=True)
+
+    def load_checkpoint(self, name):
+        
+        checkpoint = None
+        checkpoint_filepath= os.path.join(self.checkpoint_path, name)
+        if os.path.exists(checkpoint_filepath):
+            checkpoint = torch.load(
+                checkpoint_filepath
+            )
+        return checkpoint
+
+    def save_checkpoint(self, epoch, optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor, name='model.pth', verbose = 0):
+        
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state_dict': self.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'training_losses': training_losses,
+            'training_losses_sensor': training_losses_sensor,
+            'valid_losses': valid_losses,
+            'valid_losses_sensor': valid_losses_sensor
+        }
+
+        torch.save(
+            checkpoint,
+            os.path.join(self.checkpoint_path, name)
+            )
+        
+        if verbose >0:
+            print(f'Checkpoint saved at epoch {epoch}')
+
+    def remove_checkpoint(self, name):
+        checkpoint_filepath=os.path.join(self.checkpoint_path, name)
+        if os.path.exists(checkpoint_filepath):
+            os.remove()
 
     def build_encoder(self):
         encoder_layers = []
@@ -54,26 +92,40 @@ class AutoencoderFC(nn.Module):
         decoded = self.decoder(encoded)
         return encoded, decoded
 
-    def fit(self, train_data_loader, valid_data_loader, optimizer):
+    def fit(self, train_data_loader, valid_data_loader, optimizer, retrain = False):
         # Move model to the specified device
         self.to(self.params['device'])
         # Calculate the total number of batches in the training data
         num_batches = len(train_data_loader)
 
         # Initialize lists to store loss metrics for training and validation
-        training_losses = []
-        training_losses_sensor = []
-        valid_losses = []
-        valid_losses_sensor = []
+        training_losses = [0 for _ in range(self.params['num_epochs'])]
+        training_losses_sensor = [0 for _ in range(self.params['num_epochs'])]
+        valid_losses = [0 for _ in range(self.params['num_epochs'])]
+        valid_losses_sensor = [0 for _ in range(self.params['num_epochs'])]
 
         # Initialize the best validation loss to infinity and other training
         # controls
         best_valid_loss = float('inf')
-        patience_counter = 0
         best_model_state = None  # To store the best model state if improved
 
+        start_epoch = 0
+        checkpoint = None
+        if not retrain:
+            checkpoint = self.load_checkpoint(self.params['checkpoint_name'])
+            if checkpoint:
+                self.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1
+                training_losses = checkpoint['training_losses']
+                training_losses_sensor = checkpoint['training_losses_sensor']
+                valid_losses = checkpoint['valid_losses']
+                valid_losses_sensor = checkpoint['valid_losses_sensor']
+        else:
+            self.remove_checkpoint(name=self.params['checkpoint_name'])
+
         # Main training loop over specified number of epochs
-        for epoch in range(self.params['num_epochs']):
+        for epoch in range(start_epoch, self.params['num_epochs']-start_epoch):
             self.train()  # Set the model to training mode
             training_loss_epoch = 0
             training_loss_epoch_sensor = np.zeros(len(self.window_lengths))
@@ -123,16 +175,17 @@ class AutoencoderFC(nn.Module):
                 print(
                     f'Train Epoch [{epoch+1}/{self.params["num_epochs"]}] | Batch [{batch_idx+1}/{num_batches}] | '
                     f'{percent_complete:.2f}% Complete | Avg Batch Loss: {avg_batch_loss:.4f}', end='\r')
+                
 
             # Append average losses after each epoch
-            training_losses.append(avg_batch_loss)
-            training_losses_sensor.append(avg_batch_sensor_loss)
+            training_losses[epoch] = avg_batch_loss
+            training_losses_sensor[epoch] = avg_batch_sensor_loss
 
             # Evaluate model on validation data and track losses
             avg_batch_loss, avg_batch_sensor_loss = self.evaluate(
                 valid_data_loader)
-            valid_losses.append(avg_batch_loss)
-            valid_losses_sensor.append(avg_batch_sensor_loss)
+            valid_losses[epoch] = avg_batch_loss
+            valid_losses_sensor[epoch] = avg_batch_sensor_loss
 
             # Print validation results
             print(
@@ -141,26 +194,24 @@ class AutoencoderFC(nn.Module):
             print(f'sensor losses {avg_batch_sensor_loss}')
             print('\n')
 
-            # Check for improvement and update patience or terminate training
-            # if needed
-            patience_counter += 1
             if avg_batch_loss < best_valid_loss:
                 print(f'model improved valid loss = {avg_batch_loss}')
-                best_model_state = self.state_dict()  # Save the best model state
+                self.save_checkpoint(epoch, optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor, name=self.params['checkpoint_name'], verbose = 1)
                 best_valid_loss = avg_batch_loss
-                patience_counter = 0
-            if patience_counter == self.params['patience']:
-                print(
-                    f'for {self.params["patience"]} epochs model has not improved, training stopped')
-                break
 
         # Convert lists to numpy arrays for further processing if needed
-        valid_losses_sensor = pd.DataFrame(valid_losses_sensor).values
-        training_losses_sensor = pd.DataFrame(training_losses_sensor).values
+        self.valid_losses_sensor = pd.DataFrame(valid_losses_sensor).values
+        self.training_losses_sensor = pd.DataFrame(training_losses_sensor).values
 
         # Load the best model state if one was saved
-        if best_model_state is not None:
-            self.load_state_dict(best_model_state)
+        try:
+            checkpoint = self.load_checkpoint(self.params['checkpoint_name'])
+            if checkpoint:
+                self.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1
+        except:
+            pass
 
     def evaluate(self, data_loader):
         # Set the model to evaluation mode, which disables dropout and batch
@@ -274,7 +325,7 @@ class AutoencoderFC(nn.Module):
             np.concatenate(total_loss, axis=0))
 
         # Combine anomaly scores DataFrame with Y_test for analysis
-        Y_test_combined = pd.concat([pd.Series(Y_test), anomaly_scores_df], axis=1)
+        Y_test_combined = pd.concat([anomaly_scores_df, Y_test], axis=1)
 
         # Group by segment_id and aggregate as specified
         Y_test_grouped = utilities.group_by_segment_id(
@@ -293,3 +344,70 @@ class AutoencoderFC(nn.Module):
             'duplicate')  # Simplify index for clarity
 
         return results
+
+    def get_anomaly_scores(self, data_loader, criterion):
+        # Initialize lists to store various metrics
+        sensor_losses_fusing = []
+        sensor_losses_individual = []
+        total_loss = []
+        flattened_inputs = []
+        predictions = []
+        embeddings = []
+        labels = []
+
+        # Set model to evaluation mode
+        self.eval()
+        for batch_idx, (x_batch, y_batch) in enumerate(data_loader):
+            # Flatten and concatenate input data for processing
+            x_batch = torch.concat([x.flatten(1) for x in x_batch], axis=1).to(self.params['device'])
+            labels.append(pd.DataFrame(y_batch))
+
+            # Get model outputs including embeddings and predictions
+            embedding, x_batch_estimate = self(x_batch)
+
+            # Compute sensor-specific losses and convert them to NumPy for
+            # easier manipulation
+            sensor_loss_batch = torch.stack(
+                utilities.sensor_specific_loss(
+                    criterion,
+                    x_batch,
+                    x_batch_estimate,
+                    self.window_lengths,
+                    self.num_channels)).detach().cpu().numpy()
+            sensor_losses_fusing.append(sensor_loss_batch.T)
+
+            # Get individual sensor losses using a utility function
+            sensor_loss_batch_individual = utilities.get_individual_losses(
+                self, self.sensors, self.window_lengths, self.num_channels, x_batch, criterion)
+            sensor_losses_individual.append(sensor_loss_batch_individual.T)
+
+            # Compute total loss for the batch and append to the list
+            total_loss.append(
+                criterion(x_batch, x_batch_estimate).detach().cpu().numpy())
+            flattened_inputs.append(x_batch.detach().cpu().numpy())
+            predictions.append(x_batch_estimate.detach().cpu().numpy())
+            embeddings.append(embedding.detach().cpu().numpy())
+
+        # Concatenate arrays for the whole test dataset
+        flattened_inputs = np.concatenate(flattened_inputs, axis=0)
+        predictions = np.concatenate(predictions, axis=0)
+        embeddings = np.concatenate(embeddings, axis=0)
+        labels_df = pd.concat(labels, axis=0)
+
+        # Create DataFrame with sensor fusion anomaly scores and individual
+        # sensor scores
+        anomaly_scores_df = pd.DataFrame(
+            data=np.concatenate(sensor_losses_fusing), columns=[
+                f'f_{sensor}' for sensor in self.sensors])
+        anomaly_scores_df[[f's_{sensor}' for sensor in self.sensors]] = np.concatenate(
+            sensor_losses_individual)
+        
+        # Add total loss to the DataFrame
+        anomaly_scores_df['total_loss'] = pd.Series(
+            np.concatenate(total_loss, axis=0))
+
+        # add labels
+        anomaly_scores_df = pd.concat([anomaly_scores_df, labels_df.reset_index(drop=True)], axis=1)
+
+
+        return anomaly_scores_df, flattened_inputs, predictions, embeddings
