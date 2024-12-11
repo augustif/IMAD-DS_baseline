@@ -123,9 +123,15 @@ class DatasetFromNumpy(Dataset):
         idx (int): Index of the sample to retrieve.
 
         Returns:
-        list: A list of samples from each sensor at the specified index.
+        list: A list of samples from each sensor at the specified index and the relevant labels
         """
-        return [x[idx] for x in self.X], self.y[idx]
+        x = [x[idx] for x in self.X]
+        if isinstance(self.y, pd.DataFrame):
+            y = self.y.iloc[idx].to_dict()
+        elif isinstance(self.y, list):
+            y = self.y[idx]
+
+        return x, y
 
     @staticmethod
     def normalize_data(X, normalisation):
@@ -556,8 +562,9 @@ class DatasetTest(DatasetFromNumpy):
         y['combined_label'] = y['anomaly_label'] + \
             y['domain_shift_op'] + y['domain_shift_env']
         
-        super().__init__(X,y['anomaly_label'].to_list(), params['device'], params['normalisation'])
+        super().__init__(X,y, params['device'], params['normalisation'])
     
+
 if __name__ == '__main__':
 
     PARAMS = {
