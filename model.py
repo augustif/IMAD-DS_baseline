@@ -1,32 +1,38 @@
 # libraries
+import mlflow
+import mlflow.pytorch
 import numpy as np
+import os
 import pandas as pd
 import torch
 import torch.nn as nn
+import yaml
 
 # custom libraries
 import utilities
-import os
 
 class AutoencoderFC(nn.Module):
-    def __init__(self, window_lengths, num_channels, params, sensors):
+    def __init__(self, window_lengths, num_channels, sensors):
+
+        self.params = utilities.load_yaml_params()
+
         super(AutoencoderFC, self).__init__()
         self.window_lengths = window_lengths
         self.sensors = sensors
         self.num_channels = num_channels
         self.input_dim = sum(window_length * num_channel for window_length,
                              num_channel in zip(window_lengths, num_channels))
-        self.params = params
         self.encoder = self.build_encoder()
         self.decoder = self.build_decoder()
 
-        self.checkpoint_path = params['checkpoints_path']
-        os.makedirs(self.checkpoint_path, exist_ok=True)
+        os.makedirs(self.params['checkpoint_path'], exist_ok=True)
+
+        self.ml_tracking_path = self.params['ml_tracking']['path']
 
     def load_checkpoint(self, name):
         
         checkpoint = None
-        checkpoint_filepath= os.path.join(self.checkpoint_path, name)
+        checkpoint_filepath= os.path.join(self.params['checkpoint_path'], name)
         if os.path.exists(checkpoint_filepath):
             checkpoint = torch.load(
                 checkpoint_filepath
@@ -47,14 +53,14 @@ class AutoencoderFC(nn.Module):
 
         torch.save(
             checkpoint,
-            os.path.join(self.checkpoint_path, name)
+            os.path.join(self.params['checkpoint_path'], name)
             )
-        
+
         if verbose >0:
             print(f'Checkpoint saved at epoch {epoch}')
 
     def remove_checkpoint(self, name):
-        checkpoint_filepath=os.path.join(self.checkpoint_path, name)
+        checkpoint_filepath=os.path.join(self.params['checkpoint_path'], name)
         if os.path.exists(checkpoint_filepath):
             os.remove()
 

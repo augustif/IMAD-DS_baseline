@@ -1,9 +1,41 @@
 import numpy as np
+import os
 import pandas as pd
 import torch
 import h5py
 from torch.utils.data import Dataset
+import yaml
 
+def load_yaml_params(yaml_file = 'params.yaml'):
+    with open(yaml_file, 'r') as file:
+        try:
+            params = yaml.safe_load(file)
+
+            # Initialize other parameters
+            params['checkpoint_path'] = os.path.join(params['checkpoint_path'], params['machine'])
+            params['checkpoint_name'] = f"baseline_seed{params['seed']}.pth"
+            params['checkpoint_filepath'] = os.path.join(params['checkpoint_path'], params['checkpoint_name'])
+
+            # Get cpu, gpu or mps device for training.
+            device = (
+                "cuda"
+                if torch.cuda.is_available()
+                else "mps"
+                if torch.backends.mps.is_available()
+                else "cpu"
+            )
+            print(f"Using {device} device")
+
+            params['device'] = device
+            
+            params['criterion'] = eval(params['criterion'])
+
+            return params
+        except yaml.YAMLError as exc:
+            print(f"Error parsing YAML file: {exc}")
+            return None
+        
+        
 def sensor_specific_loss(criterion, x_batch_concat, x_batch_estimate, WINDOW_LENGTHS, NUM_CHANNELS):
     """
     Calculate the loss for each sensor separately.
@@ -409,3 +441,7 @@ def MAPE(tensor1, tensor2, epsilon=1e-10):
     torch.Tensor: A tensor containing the MAPE for each sample in the batch.
     """
     return torch.mean(torch.abs((tensor1 - tensor2) / (tensor1 + epsilon)) * 100, dim=1)
+
+if __name__=='__main__':
+    params=load_yaml_params()
+    print(params)
