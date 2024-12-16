@@ -14,7 +14,7 @@ import utilities
 class AutoencoderFC(nn.Module):
     def __init__(self, window_lengths, num_channels, sensors):
 
-        self.params = utilities.load_yaml_params()
+        self.params = utilities.load_yaml_params(verbose=0)
 
         super(AutoencoderFC, self).__init__()
         self.window_lengths = window_lengths
@@ -39,6 +39,13 @@ class AutoencoderFC(nn.Module):
             )
         return checkpoint
 
+    def save_weights(self, epoch):
+        checkpoint_filename = f'model_epoch_{epoch + 1}.pth'
+        checkpoint_filepath = os.path.join(self.params['checkpoint_path'], checkpoint_filename)
+
+        # Log checkpoint to MLflow
+        mlflow.log_artifact(checkpoint_filepath, artifact_path="checkpoints")
+
     def save_checkpoint(self, epoch, optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor, name='model.pth', verbose = 0):
         
         checkpoint = {
@@ -51,11 +58,16 @@ class AutoencoderFC(nn.Module):
             'valid_losses_sensor': valid_losses_sensor
         }
 
+        checkpoint_filepath = os.path.join(self.params['checkpoint_path'], name)
+
         torch.save(
             checkpoint,
-            os.path.join(self.params['checkpoint_path'], name)
+            checkpoint_filepath
             )
-
+        
+        # Log checkpoint to MLflow
+        mlflow.log_artifact(checkpoint_filepath, artifact_path="checkpoints")
+        
         if verbose >0:
             print(f'Checkpoint saved at epoch {epoch}')
 
@@ -187,6 +199,11 @@ class AutoencoderFC(nn.Module):
             training_losses[epoch] = avg_batch_loss
             training_losses_sensor[epoch] = avg_batch_sensor_loss
 
+            # Log training metrics to MLflow
+            mlflow.log_metric("training_loss", avg_batch_loss, step=epoch)
+            for i, sensor_loss in enumerate(avg_batch_sensor_loss):
+                mlflow.log_metric(f"training_loss_sensor_{i}", sensor_loss, step=epoch)
+
             # Evaluate model on validation data and track losses
             avg_batch_loss, avg_batch_sensor_loss = self.evaluate(
                 valid_data_loader)
@@ -200,9 +217,19 @@ class AutoencoderFC(nn.Module):
             print(f'sensor losses {avg_batch_sensor_loss}')
             print('\n')
 
+            # Log validation metrics to MLflow
+            mlflow.log_metric("validation_loss", avg_batch_loss, step=epoch)
+            for i, sensor_loss in enumerate(avg_batch_sensor_loss):
+                mlflow.log_metric(f"validation_loss_sensor_{i}", sensor_loss, step=epoch)
+
+            # track model weights 
+            if (epoch + 1) % 1 == 0:
+                self.save_checkpoint(epoch, optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor, name= f'epoch{epoch}' + self.params['checkpoint_name'] , verbose=1)
+
+            # save best model
             if avg_batch_loss < best_valid_loss:
                 print(f'model improved valid loss = {avg_batch_loss}')
-                self.save_checkpoint(epoch, optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor, name=self.params['checkpoint_name'], verbose = 1)
+                self.save_checkpoint(epoch, optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor, name='best_' + self.params['checkpoint_name'], verbose = 1)
                 best_valid_loss = avg_batch_loss
 
         # Convert lists to numpy arrays for further processing if needed
