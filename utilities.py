@@ -6,11 +6,11 @@ import h5py
 from torch.utils.data import Dataset
 import yaml
 
-def load_yaml_params(yaml_file = 'params.yaml'):
+def load_yaml_params(yaml_file = 'params.yaml', verbose = 1):
     with open(yaml_file, 'r') as file:
         try:
             params = yaml.safe_load(file)
-
+            
             # Initialize other parameters
             params['checkpoint_path'] = os.path.join(params['checkpoint_path'], params['machine'])
             params['checkpoint_name'] = f"baseline_seed{params['seed']}.pth"
@@ -24,13 +24,18 @@ def load_yaml_params(yaml_file = 'params.yaml'):
                 if torch.backends.mps.is_available()
                 else "cpu"
             )
-            print(f"Using {device} device")
 
             params['device'] = device
             
             params['criterion'] = eval(params['criterion'])
 
+            if verbose ==1:
+                print(f"Using {device} device")
+                for k,v in params.items():
+                    print(k, ':', v)
+
             return params
+        
         except yaml.YAMLError as exc:
             print(f"Error parsing YAML file: {exc}")
             return None
@@ -198,7 +203,7 @@ def calculate_single_auc(df, anomaly_score_column):
     return AUC
 
 
-def group_by_segment_id(df, anomaly_score_columns, aggregation_type='mean'):
+def group_by_segment_id(df, anomaly_score_columns, aggregation_type='mean', verbose = 1):
     """
     Group a DataFrame by 'segment_id' and aggregate the specified columns.
 
@@ -211,18 +216,15 @@ def group_by_segment_id(df, anomaly_score_columns, aggregation_type='mean'):
     pd.DataFrame: DataFrame grouped by 'segment_id' with aggregated values.
     """
     # Define the aggregation operations for each column
-    grouping_dict = {
-        'combined_label': 'first',  # Use the first value of 'combined_label' in each group
-        'split_label': 'first',     # Use the first value of 'split_label' in each group
-        'anomaly_label': 'first',   # Use the first value of 'anomaly_label' in each group
-        'domain_shift_op': 'first',  # Use the first value of 'domain_shift_op' in each group
-        'domain_shift_env': 'first'  # Use the first value of 'domain_shift_env' in each group
-    }
+    grouping_dict = {k:'first' for k in df.columns if k is not 'segment_id'}
 
     # Add the specified aggregation type for each anomaly score column
     for column in anomaly_score_columns:
         grouping_dict[column] = aggregation_type
-
+    
+    if verbose:
+        print('grouping_dict', ':', grouping_dict)
+        
     # Group the DataFrame by 'segment_id' and apply the aggregation
     grouped_df = df.groupby('segment_id').agg(grouping_dict).reset_index()
 
