@@ -6,53 +6,15 @@ from time import gmtime, strftime
 import h5py
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from sklearn.model_selection import train_test_split
 import torch
 from torch.utils.data import Dataset
 
 #custom
-from datasets.dataset_utilities import *
+from datasets.dataset_utilities import download_file, unzip_7z_file
 
-class DatasetFromSegmentFiles(Dataset):
-    def __init__(self, csv_file, root_dir, sensors = ['imp23absu_mic', 'ism330dhcx_acc', 'ism330dhcx_gyr'], transform=None):
-        """
-        Args:
-            csv_file (string): Path to the csv file with annotations.
-            root_dir (string): Directory with all the sensor data files.
-            transform (callable, optional): Optional transform to be applied
-                on a sample.
-        """
-        self.annotations = pd.read_csv(csv_file)
-        self.root_dir = root_dir
-        self.transform = transform
-        self.sensors = sensors
-        self.labels_map = {
-            'normal': 0,
-            'anomaly': 1
-        }        
-
-    def __len__(self):
-        return len(self.annotations)
-
-    def __getitem__(self, idx):
-        sensor_data = []
-        row = self.annotations.iloc[idx, :]
-
-        for sensor in self.sensors:
-            sensor_file = os.path.join(self.root_dir,row[sensor] )
-            sensor_df = pd.read_parquet(sensor_file)
-            sensor_data.append(sensor_df.values.astype('float32'))
-        
-        # Concatenate all sensor data along the last dimension
-        sample = torch.tensor(sensor_data, dtype=torch.float32)
-        label = self.labels_map[row['anomaly_label']]
-        
-        if self.transform:
-            sample = self.transform(sample)
-        
-        return sample, label
-
-class DatasetFromNumpy(Dataset):
+class IMADSBaseDataset(Dataset):
     """
     Custom Dataset for handling multi-sensor data.
     """
@@ -70,28 +32,61 @@ class DatasetFromNumpy(Dataset):
                 'number_of_channel': 3
             }
         }
-    # Duration of initial data time affected by the gyroscope warm-up period
-    gyroscope_warm_up_time = pd.to_timedelta('35ms')
 
-    # List of label names to be extracted from the dataset
     label_names = [
         'segment_id',
         'split_label',
         'anomaly_label',
         'domain_shift_op',
         'domain_shift_env'
-        ]  
-    
-    def __init__(self, X, y, device, transform=None):
+        ]
+    # Duration of initial data time affected by the gyroscope warm-up period
+    gyroscope_warm_up_time = pd.to_timedelta('35ms')
+
+    def set_sensor_dict(self, sensor_dict):
+        self.sensor_dict = sensor_dict    
+
+    def update_sensors_dict(self, sensor_dict = None, sensors_enabled = None):
+        # update sensors_dict based on enabled_sensors
+        if not sensors_enabled:
+            raise ValueError("sensors_enabled cannot be empty")
+        else:
+            if sensor_dict:
+                self.set_sensor_dict(sensor_dict)
+                print(f"Overridden sensor dict: {self.sensor_dict}")
+
+            prev_sensor_dict = self.sensor_dict.copy()
+            self.sensor_dict = {k: v for k, v in self.sensor_dict.items() if k in sensors_enabled}
+            if sensor_dict  != prev_sensor_dict:
+                print(f"Sensor dict updated: {self.sensor_dict}")
+
+
+    def __init__(self, 
+                 X: list[np.array], 
+                 y: list[str], 
+                 device: str, 
+                 sensors_enabled: list[str] = ['all'],
+                 sensor_dict: dict = None, 
+                 label_names: list['str'] = None, 
+                 transform_pipeline: object = None
+                 ):
         """
-        Initialize the CustomDataset with sensor data.
+        Initialize the Dataset with sensor data.
 
         Parameters:
+        sensor dict (dict): Dictionary containing sensor names and their respective attributes.
+        label_names (list): List of label names to extract from the dataset.
         X (list): List of numpy arrays, where each array contains data from a different sensor.
         y (list): List of string, where each string represent the label of i-th element of X arrays.
-        transform (str): Normalization method ('std', 'min-max', 'std_window', or 'min-max_window').
-
+        transform (str): Normalization method ('std', 'min-max', 'std_window', or 'min-max_window').        
         """
+
+        # update sensor_dict based on enabled_sensors
+        self.update_sensors_dict(sensor_dict, sensors_enabled)
+
+        if label_names is not None:
+            self.label_names = label_names
+
         self.X = X
         self.y = y
 
@@ -103,8 +98,51 @@ class DatasetFromNumpy(Dataset):
 
         # apply transform (data normalization) function on the whole dataset
         # during initialization to speed up __get_item__()
-        if transform is not None:
-            self.X = self.normalize_data(self.X, transform)
+        if transform_pipeline is not None:
+            self.X = transform_pipeline.transform(self.X)
+    
+    def set_transform_pipeline(self, pipeline):
+        self.transform_pipeline = pipeline
+
+    def apply_preprocess_pipeline(self):
+        if self.transform_pipeline is None:
+                raise ValueError("No transform pipeline set. Call set_transform_pipeline() before apply_preprocess_pipeline()")
+        self.X = self.transform_pipeline.transform(self.X)
+    
+    @staticmethod
+    def check_or_get_data(machine: str = 'BrushlessMotor', data_folder: Path = Path('data')):
+        """
+        Check if data is already downloaded, if not, download and extract it.
+
+        Parameters:
+        machine (str): Name of the machine (e.g., 'BrushlessMotor').
+        data_folder (Path): Path to the data folder.
+        """
+        # Check if the data folder already contains the necessary files
+        required_files = [
+            data_folder / machine / 'train/attributes_normal_source_train.csv',
+            data_folder / machine / 'train/attributes_normal_target_train.csv',
+            data_folder / machine / 'test/attributes_normal_source_test.csv',
+            data_folder / machine / 'test/attributes_anomaly_source_test.csv',
+            data_folder / machine / 'test/attributes_normal_target_test.csv',
+            data_folder / machine / 'test/attributes_anomaly_target_test.csv'
+        ]
+        
+        if all(file.exists() for file in required_files):
+            print(f"Data for {machine} already exists in {data_folder}.")
+            return
+        
+        # If any required file is missing, download and extract the data
+        if not os.path.exists(data_folder):
+            os.makedirs(data_folder)
+
+        local_filename = data_folder / Path(f'{machine}.7z')
+
+        download_file(
+            url=f'https://zenodo.org/record/12665499/files/{machine}.7z',
+            local_filename=local_filename
+        )
+        unzip_7z_file(file_path=local_filename, extract_to=data_folder)
 
     def __len__(self):
         """
@@ -125,64 +163,16 @@ class DatasetFromNumpy(Dataset):
         Returns:
         list: A list of samples from each sensor at the specified index and the relevant labels
         """
+        # self.X: list of n sensors numpy arrays, with shape (num_windows, num_channels, window_lenght) 
         x = [x[idx] for x in self.X]
         if isinstance(self.y, pd.DataFrame):
             y = self.y.iloc[idx].to_dict()
         elif isinstance(self.y, list):
             y = self.y[idx]
-
+        # x: (stacked_sensors_size), y=(1) where stacked_sensors_size is: for each sensor sum(sensor_channels*sensor_window_length) 
         return x, y
 
-    @staticmethod
-    def normalize_data(X, normalisation):
-        """
-        Normalize the training, validation, and test datasets using the specified normalization method.
-
-        Parameters:
-        X (list): List of numpy arrays, one per sensor.
-        normalisation (str): Normalization method ('std', 'min-max', 'std_window', or 'min-max_window').
-
-        Returns:
-        tuple: Normalized datasets.
-        """
-
-        sensor_count = len(X)
-        channel_counts = [X[i].shape[1] for i in range(sensor_count)]
-
-        if normalisation == 'std':
-            # Calculate means and standard deviations across all samples and windows for each sensor
-            means_ = [X[i].mean(2).mean(0).reshape(
-                1, channel_counts[i], 1) for i in range(sensor_count)]
-            stds_ = [X[i].std(2).mean(0).reshape(
-                1, channel_counts[i], 1) for i in range(sensor_count)]
-
-            # Standardize each dataset using the calculated means and standard deviations
-            X = [standardize(X[i], means_[i], stds_[i])
-                    for i in range(sensor_count)]
-
-        elif normalisation == 'min-max':
-            # Calculate min and max values across all samples and windows for each sensor
-            mins_ = [X[i].min(2).min(0).reshape(
-                1, channel_counts[i], 1) for i in range(sensor_count)]
-            maxs_ = [X[i].max(2).max(0).reshape(
-                1, channel_counts[i], 1) for i in range(sensor_count)]
-
-            # Apply min-max scaling to each dataset using the calculated min and max values
-            X = [min_max_scale(X[i], mins_[i], maxs_[i])
-                    for i in range(sensor_count)]
-
-        elif normalisation == 'std_window':
-            # Apply standardization within each window for each sensor
-            X = [standardize_window(X[i]) for i in range(sensor_count)]
-
-        elif normalisation == 'min-max_window':
-            # Apply min-max scaling within each window for each sensor
-            X = [min_max_scale_window(X[i])
-                    for i in range(sensor_count)]
-        
-        return X
-
-    def load_windows_dataset(self, path, label_names, sensors):
+    def load_windows(self, path, label_names, sensors):
         """
         Load training and testing datasets from HDF5 files.
 
@@ -207,7 +197,7 @@ class DatasetFromNumpy(Dataset):
             
         return X_raw, Y_raw
 
-    def process_windows_dataset(self, split_type, metadata, sensor_dict, output_folder, window_size_ts, gyroscope_warm_up_time):
+    def to_windows(self, split_type, metadata, sensor_dict, output_folder, window_size_ts, gyroscope_warm_up_time):
         # Loop through each dataset split type ('train' and 'test') with
         # corresponding metadata
 
@@ -395,7 +385,7 @@ class DatasetFromNumpy(Dataset):
                 except Exception as e:
                     print('could not read file index {}'.format(file_index), e)
 
-class DatasetTrain(DatasetFromNumpy):
+class IMADSDatasetTrain(IMADSBaseDataset):
     """
     Custom Dataset for handling multi-sensor data.
 
@@ -403,7 +393,18 @@ class DatasetTrain(DatasetFromNumpy):
     X (list): List of numpy arrays, where each array contains data from a different sensor.
     """
 
-    def __init__(self, machine = 'BrushlessMotor', window_size_ms = 100, params = None):
+    def __init__(self,
+                 seed: int,
+                 data_folder: Path = Path('data'),
+                 sensors_enabled: list[str] = ['ism330dhcx_acc', 'ism330dhcx_gyro', 'imp23absu_mic'],
+                 sensor_dict = None, 
+                 label_names = None, 
+                 machine = 'BrushlessMotor', 
+                 window_size_ms: int = 100, 
+                 device: str ='cpu',
+                 transform_pipeline: object = None,
+                 valid_size:int=0.1,
+                 ):
         """
         Initialize the CustomDataset with sensor data.
 
@@ -411,9 +412,12 @@ class DatasetTrain(DatasetFromNumpy):
         X (list): List of numpy arrays, where each array contains data from a different sensor.
         """
         self.machine = machine
+
         # Initializations
-        self.input_folder = f'data/{self.machine}'
-        self.output_folder = f'data/{self.machine}/windowed'
+        self.input_folder = data_folder / Path(self.machine)
+        self.output_folder = data_folder / Path(self.machine) / Path('windowed')
+
+        super().check_or_get_data(machine, data_folder)
         os.makedirs(self.output_folder, exist_ok=True)
 
         # constants
@@ -437,21 +441,26 @@ class DatasetTrain(DatasetFromNumpy):
             [normal_source_train, normal_target_train], axis=0).reset_index(drop=True)
         
         # create segment id column
-        metadata['segment_id'] = metadata['imp23absu_mic'].apply(
-            lambda x: x.replace('imp23absu_mic_', ''))
+        dummy_sensor = list(self.sensor_dict.keys())[0]
+        metadata['segment_id'] = metadata[dummy_sensor].apply(
+            lambda x: x.replace(dummy_sensor, ''))
 
         # add custom dataset path to each filepath in the Metadata dataframes
         for sensor in self.sensor_dict.keys():
-            metadata[sensor] = self.input_folder + '/train/' + metadata[sensor]
+            metadata[sensor] = str(self.input_folder) + '/train/' + metadata[sensor]
         
         self.metadata = metadata
 
         # create windows dataset if not present yet
-        self.process_windows_dataset('train', metadata, self.sensor_dict, self.output_folder, self.window_size_ts, self.gyroscope_warm_up_time)
+        self.to_windows('train', metadata, self.sensor_dict, self.output_folder, self.window_size_ts, self.gyroscope_warm_up_time)
 
-        X, y = self.load_windows_dataset(
-            path ='data/{}/windowed/train_dataset_window_{:.3f}s.h5'.format(
-                self.machine,
+        # update sensors dict before loading to ensure only enabled sensors are loaded
+        self.update_sensors_dict(sensor_dict, sensors_enabled)
+
+        # X: list of n sensors --> (num_windows, num_channels, window_lenght)
+        X, y = self.load_windows(
+            path ='{}/train_dataset_window_{:.3f}s.h5'.format(
+                self.output_folder,
                 self.window_size_ts.total_seconds()
             ),
             label_names = self.label_names,
@@ -468,8 +477,8 @@ class DatasetTrain(DatasetFromNumpy):
             range(len(y)),
             y,
             stratify=y['combined_label'],
-            test_size=params['valid_size'],
-            random_state=params['seed']
+            test_size=valid_size,
+            random_state=seed
         )
 
         # Select the training and validation data based on the indices
@@ -478,14 +487,21 @@ class DatasetTrain(DatasetFromNumpy):
         y_train = y.iloc[train_indices].reset_index(drop=True)
         y_valid = y.iloc[valid_indices].reset_index(drop=True)
         
-        super().__init__(X_train, y_train['anomaly_label'].to_list(), params['device'], params['normalisation'])
+        super().__init__(X_train, 
+                        y_train['anomaly_label'].to_list(), 
+                        sensors_enabled=sensors_enabled,
+                        sensor_dict=sensor_dict,
+                        label_names=label_names,
+                        device=device, 
+                        transform_pipeline=transform_pipeline)
+        
         self.X_valid = X_valid
         self.y_valid = y_valid
 
     def get_valid_dataset(self):
         return self.X_valid, self.y_valid
 
-class DatasetTest(DatasetFromNumpy):
+class IMADSDatasetTest(IMADSBaseDataset):
     """
     Custom Dataset for handling multi-sensor data.
 
@@ -493,7 +509,16 @@ class DatasetTest(DatasetFromNumpy):
     X (list): List of numpy arrays, where each array contains data from a different sensor.
     """
 
-    def __init__(self, machine = 'BrushlessMotor', window_size_ms = 100, params = None):
+    def __init__(self,
+                 data_folder: Path = Path('data'),
+                 sensors_enabled: list[str] = ['all'], 
+                 sensor_dict = None, 
+                 label_names = None, 
+                 machine = 'BrushlessMotor', 
+                 window_size_ms: int = 100, 
+                 device: str ='cpu',
+                 transform_pipeline: object = None
+                 ):
         """
         Initialize the CustomDataset with sensor data.
 
@@ -501,9 +526,12 @@ class DatasetTest(DatasetFromNumpy):
         X (list): List of numpy arrays, where each array contains data from a different sensor.
         """
         self.machine = machine
+
         # Initializations
-        self.input_folder = f'data/{self.machine}'
-        self.output_folder = f'data/{self.machine}/windowed'
+        self.input_folder = data_folder / Path(self.machine)
+        self.output_folder = data_folder / Path(self.machine) / Path('windowed')
+
+        super().check_or_get_data(machine, data_folder)
         os.makedirs(self.output_folder, exist_ok=True)
 
         # constants
@@ -514,7 +542,7 @@ class DatasetTest(DatasetFromNumpy):
             sensor = self.sensor_dict[sensor]
             sensor['window_length'] = int(
                 sensor['fs'] * self.window_size_ts.total_seconds())
-        
+
         # load metadata
         normal_source_test = pd.read_csv(
             f'{self.input_folder}/test/attributes_normal_source_test.csv',
@@ -536,34 +564,39 @@ class DatasetTest(DatasetFromNumpy):
                                 axis=0).reset_index(drop=True)
         
         # create segment id column
-        metadata['segment_id'] = metadata['imp23absu_mic'].apply(
-            lambda x: x.replace('imp23absu_mic_', ''))
+        dummy_sensor = list(self.sensor_dict.keys())[0]
+        metadata['segment_id'] = metadata[dummy_sensor].apply(
+            lambda x: x.replace(dummy_sensor, ''))
 
         # add custom dataset path to each filepath in the Metadata dataframes
         for sensor in self.sensor_dict.keys():
-            metadata[sensor] = self.input_folder + '/test/' + metadata[sensor]
+            metadata[sensor] = str(self.input_folder) + '/test/' + metadata[sensor]
         
         self.metadata = metadata
 
         # create windows dataset if not present yet
-        self.process_windows_dataset('test', metadata, self.sensor_dict, self.output_folder, self.window_size_ts, self.gyroscope_warm_up_time)
-         
-        # load all dataset in memory to spped up training 
-        X, y = self.load_windows_dataset(
-            path ='data/{}/windowed/test_dataset_window_{:.3f}s.h5'.format(
-                self.machine,
+        self.to_windows('test', metadata, self.sensor_dict, self.output_folder, self.window_size_ts, self.gyroscope_warm_up_time)
+
+        X, y = self.load_windows(
+            path ='{}/test_dataset_window_{:.3f}s.h5'.format(
+                self.output_folder,
                 self.window_size_ts.total_seconds()
             ),
             label_names = self.label_names,
             sensors= self.sensor_dict
-        )
+            )
         
         # Combine anomaly labels and domain shift labels to form a combined label
         y['combined_label'] = y['anomaly_label'] + \
             y['domain_shift_op'] + y['domain_shift_env']
         
-        super().__init__(X,y, params['device'], params['normalisation'])
-    
+        super().__init__(X, 
+                        y,
+                        sensors_enabled=sensors_enabled,
+                        sensor_dict=sensor_dict,
+                        label_names=label_names,
+                        device=device, 
+                        transform_pipeline=transform_pipeline)
 
 if __name__ == '__main__':
 
@@ -579,4 +612,4 @@ if __name__ == '__main__':
     'seed': 1995
     }
 
-    ds = DatasetTrain(machine="BrushlessMotor", window_size_ms=100, params=PARAMS)
+    ds = IMADSDatasetTrain(machine="BrushlessMotor", window_size_ms=100, params=PARAMS)
