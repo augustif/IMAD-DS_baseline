@@ -1,48 +1,30 @@
-import numpy as np
-import os
-import pandas as pd
 import torch
-import yaml
-import metrics
+def get_device(verbose: int = 0):
+    device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
+        )
+    if verbose>0:
+        print(f"Using device: {device}")
+    return device
 
-def load_yaml_params(yaml_file = 'params.yaml', verbose = 1):
-    with open(yaml_file, 'r') as file:
-        try:
-            params = yaml.safe_load(file)
-            
-            # Initialize other parameters
-            params['checkpoint_path'] = os.path.join(params['checkpoint_path'], params['machine'])
-            params['checkpoint_name'] = f"{params['checkpoint_name']}_seed{params['seed']}.pth"
-            params['checkpoint_filepath'] = os.path.join(params['checkpoint_path'], params['checkpoint_name'])
-
-            # Get cpu, gpu or mps device for training.
-            device = (
-                "cuda"
-                if torch.cuda.is_available()
-                else "mps"
-                if torch.backends.mps.is_available()
-                else "cpu"
-            )
-
-            params['device'] = device
-            
-            params['criterion'] = eval(f"metrics.{params['criterion']}")
-
-            if verbose ==1:
-                print(f"Using {device} device")
-                for k,v in params.items():
-                    print(k, ':', v)
-
-            return params
-        
-        except yaml.YAMLError as exc:
-            print(f"Error parsing YAML file: {exc}")
-            return None
-
-def get_sensors_enabled(params):
-
-    return [sensor for sensor, value in params['sensors_enabled'].items() if value==True]
-
-if __name__=='__main__':
-    params=load_yaml_params()
-    print(params)
+def set_torch_seed(seed: int, device: str = 'cpu', verbose: int = 0):
+    torch.manual_seed(seed)
+    
+    if device == 'mps':
+        torch.mps.manual_seed(seed)
+    elif device == 'cuda':
+        torch.cuda.manual_seed(seed)
+    elif device == 'cpu':
+        torch.manual_seed(seed)
+    else:
+        raise ValueError(f"Wrong device value: {device}")
+    
+    if verbose>0:
+        print(f"Setting torch seed to {seed}")
+    
+def get_sensors_enabled(cfg):
+    return [sensor for sensor, value in cfg.sensors_enabled.items() if value==True]

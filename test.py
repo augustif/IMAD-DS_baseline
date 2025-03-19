@@ -1,4 +1,4 @@
-import argparse
+import hydra
 import mlflow
 import os
 from pathlib import Path
@@ -6,80 +6,66 @@ import torch
 from torch.utils.data import DataLoader
 
 # custom
-from models import Autoencoder, IMADSModelManager
+import metrics
+from models import IMADSModelManager
 import utilities
 from datasets.dataset_IMADS import IMADSDatasetTest
 from preprocessing.prepr_pipelines import PreprocessingPipeline
 
-if __name__ == '__main__':
+
+@hydra.main(config_path="conf", config_name="config")
+def main(cfg):
+    print(cfg)
     with mlflow.start_run():
-        parser = argparse.ArgumentParser()
-        parser.add_argument("--data_folder", type=str, help="path to train and test data root folder")
-        parser.add_argument("--checkpoint_path", type=str, help="path to checkpoints folder")
-        parser.add_argument("--results_folder" , type=str, help="path to results folder")
-        parser.add_argument("--model_path", type=str, help="path to mlflow mdoel tracking uri")
-        args = parser.parse_args()
+        
+        device = utilities.get_device(verbose=1)
+        utilities.set_torch_seed(cfg.seed, device, verbose=1)
 
-        print('Resolved model path:', args.model_path)
+        sensors_enabled = utilities.get_sensors_enabled(cfg)
+        print(f'Sensors enabled: {sensors_enabled}')
 
-        params = utilities.load_yaml_params()
-
-        params['data_folder'] = args.data_folder if args.data_folder else params['data_folder']
-        params['checkpoint_path'] = args.checkpoint_path if args.checkpoint_path else params['checkpoint_path']
-        params['results_folder'] = args.results_folder if args.results_folder else params['results_folder']
-        params['ml_tracking']['model_path'] = args.model_path if args.model_path else params['ml_tracking']['model_path']
-
-        # Set the seed for general torch operations
-        torch.manual_seed(params['seed'])
-
-        # Set the seed for MPS torch operations (ones that happen on the MPS Apple GPU)
-
-        if params['device'] == 'mps':
-            torch.mps.manual_seed(params['seed'])
-        elif params['device'] == 'cuda':
-            torch.cuda.manual_seed(params['seed'])
-        elif params['device'] == 'cpu':
-            torch.manual_seed(params['seed'])
-        else:
-            raise ValueError(f"Wrong device value: {params['device']}")
-
-        sensors_enabled = utilities.get_sensors_enabled(params)
-        print(sensors_enabled)
-
-        pipeline_params = params['preprocess_pipeline']
+        pipeline_cfg = cfg.preprocess_pipeline
         preproc_pipeline = PreprocessingPipeline(
-            norm=params['normalization'],
-            device=params['device'],
-            **pipeline_params,  # Correctly unpack the pipeline parameters
-        )        
+            norm=cfg.normalization,
+            device=device,
+            **pipeline_cfg,  # Correctly unpack the pipeline parameters
+        )
 
         test_dataset = IMADSDatasetTest(
-            data_folder=Path(params['data_folder']),
+            data_folder=cfg.data_folder,
             sensors_enabled=sensors_enabled,
-            machine=params['machine'], 
-            window_size_ms=params['window_size_ms'],
-            device=params['device'],
-            transform_pipeline=None,
+            machine = cfg.machine,
+            window_size_ms = cfg.window_size_ms,
+            transform_pipeline = None,
+            device=device,
         )
         test_dataset.set_transform_pipeline(preproc_pipeline.pipeline)
         test_dataset.apply_preprocess_pipeline()
 
         test_data_loader = DataLoader(
-            test_dataset, batch_size=params['batch_size'], shuffle=False)
+            test_dataset, batch_size=cfg.batch_size, shuffle=False)
         
         # Extract the number of channels and window lengths for each sensor\n",
         num_channels = [x.shape[1] for x in test_dataset.X]
         window_lengths = [x.shape[2] for x in test_dataset.X]
         sensors = test_dataset.sensor_dict
 
-        # model = Autoencoder(window_lengths, num_channels, params['layer_dims'])
-        # checkpoint = torch.load(params['checkpoint_filepath'], map_location=torch.device(params['device']), weights_only=False)
+        # model = Autoencoder(window_lengths, num_channels, cfg['layer_dims'])
+        # checkpoint = torch.load(cfg['checkpoint_filepath'], map_location=torch.device(cfg['device']), weights_only=False)
         # model.load_state_dict(checkpoint['model_state_dict'])
-        # optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'])
-        model = mlflow.pytorch.load_model(model_uri=params['ml_tracking']['model_path'], map_location=params['device'])
-        optimizer = torch.optim.Adam(model.parameters(), lr=params['lr'])
+        # optimizer = torch.optim.Adam(model.parameters(), lr=cfg['lr'])
 
-        model_manager = IMADSModelManager(model, optimizer, params['criterion'], window_lengths, num_channels, sensors, params=params)
+        model = mlflow.pytorch.load_model(
+            model_uri= f'{cfg.ml_tracking.path}/{cfg.ml_tracking.model_path}', 
+            map_location=device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+
+        model_manager = IMADSModelManager(model=model, 
+                                          optimizer=optimizer, 
+                                          criterion=eval(f"metrics.{cfg.criterion}"), 
+                                          window_lengths=window_lengths, 
+                                          num_channels=num_channels, 
+                                          sensors=sensors)
 
         AUC_scores = model_manager.test(test_data_loader, 'median')
 
@@ -107,7 +93,7 @@ if __name__ == '__main__':
         metrics = metrics.round(2)
         print(metrics)
         
-        results_path = Path(params['results_folder']) / params['machine']
+        results_path = Path(cfg.results_folder) / cfg.machine
         results_path.mkdir(parents=True, exist_ok=True)
         metrics.to_csv(results_path / 'AUC_scores.csv')
 
@@ -118,8 +104,9 @@ if __name__ == '__main__':
                 mlflow.log_metric(metric_name, row[column])
         
         # Log artifacts (CSV file)
-        mlflow.log_artifacts(results_path)
+        mlflow.log_artifacts(local_dir=str(results_path),
+                            artifact_path='results',
+                            run_id=mlflow.active_run().info.run_id)
 
-
-
-
+if __name__ == '__main__':
+    main()

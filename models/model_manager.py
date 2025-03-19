@@ -4,26 +4,32 @@ import mlflow.pytorch
 import numpy as np
 import os
 import pandas as pd
+import shutil
 import torch
 import torch.nn as nn
+from pathlib import Path
 
 # custom libraries
 import utilities
 from metrics.perf_metrics import sensor_specific_loss, overall_loss, get_individual_losses, calculate_single_auc, group_by_segment_id
 
+
 class IMADSModelManager:
 
-    def __init__(self, 
+    def __init__(self,
                  model: torch.nn.Module,
                  optimizer: torch.optim.Optimizer,
                  criterion: torch.nn.Module,
                  window_lengths: list[int],
                  num_channels: list[int],
                  sensors: dict,
-                 preprocess_pipeline: callable =  None,
+                 preprocess_pipeline: callable = None,
                  postprocess_pipeline: callable = None,
                  save_after_n_epochs: int = 10,
-                 params: dict = None
+                 checkpoint_path: str = 'checkpoints',
+                 checkpoint_filename: str = None,
+                 ml_tracking_path: str = 'mlruns',
+                 ml_tracking_model_path: str = 'model',
                  ):
 
         self.model = model
@@ -33,45 +39,67 @@ class IMADSModelManager:
         self.window_lengths = window_lengths
         self.num_channels = num_channels
         self.sensors = sensors
-        self.params = params
-        os.makedirs(self.params['checkpoint_path'], exist_ok=True)
-        self.ml_tracking_path = self.params['ml_tracking']['path']
+        self.checkpoint_path = Path(checkpoint_path)
+        self.checkpoint_filename = Path(checkpoint_filename) if checkpoint_filename else Path('')
+        self.checkpoint_filepath = self.checkpoint_path / self.checkpoint_filename
+        self.ml_tracking_path = Path(ml_tracking_path)
+        self.ml_tracking_model_path = Path(ml_tracking_model_path)
         self.preprocess_pipeline = preprocess_pipeline
         self.postprocess_pipeline = postprocess_pipeline
         self.save_after_n_epochs = save_after_n_epochs
 
+        # Get cpu, gpu or mps device for training.
+        device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
+        )
+        print(f"IMADSModelManager: Using {device} device")
+        self.device = device
         self.best_model_checkpoint = None
 
-    def load_checkpoint(self, name):
-        
+    def load_checkpoint(self,
+                         name: str # include .pth extension
+                         ):
+
         checkpoint = None
-        checkpoint_filepath= os.path.join(self.params['checkpoint_path'], name)
-        if os.path.exists(checkpoint_filepath):
-            checkpoint = torch.load(
-                checkpoint_filepath,
-                map_location=torch.device(self.params['device'])
-            )
+        checkpoint_filepath = self.checkpoint_path / name
+        if checkpoint_filepath.exists():
+            try:
+                checkpoint = torch.load(
+                    checkpoint_filepath,
+                    map_location=torch.device(self.device)
+                )
+            except:
+                print(f'Error loading checkpoint at {checkpoint_filepath}')
         return checkpoint
-    
+
     def set_best_model(self):
         if self.best_model_checkpoint:
             checkpoint = self.best_model_checkpoint
-            print('Found best model checkpoint in model_manager args, setting best model ...')
+            print(
+                'Found best model checkpoint in model_manager args, setting best model ...')
         else:
-            print('best model checkpoint not found in model_manager args, searching best model checkpoint ...')
+            print(
+                'best model checkpoint not found in model_manager args, searching best model checkpoint ...')
             try:
-                checkpoint = self.load_checkpoint('best_' + self.params['checkpoint_name'])
-                print('Found best model checkpoint saved in memory, setting best model ...')
+                checkpoint = self.load_checkpoint(
+                    f'best_{self.checkpoint_filename}.pth')
+                print(
+                    'Found best model checkpoint saved in memory, setting best model ...')
             except:
-                raise(ValueError("No best model checkpoint found, please train the model first"))
-        
+                raise (ValueError(
+                    "No best model checkpoint found, please train the model first"))
+
         if checkpoint:
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
     def save_weights(self, epoch):
         checkpoint_filename = f'model_epoch_{epoch + 1}.pth'
-        checkpoint_filepath = os.path.join(self.params['checkpoint_path'], checkpoint_filename)
+        checkpoint_filepath = self.checkpoint_path / checkpoint_filename
 
         # Log checkpoint to MLflow
         mlflow.log_artifact(checkpoint_filepath, artifact_path="checkpoints")
@@ -94,38 +122,46 @@ class IMADSModelManager:
         }
         return checkpoint
 
-    def save_checkpoint(self, checkpoint, name='model.pth', verbose = 0):
-        
-        checkpoint_filepath = os.path.join(self.params['checkpoint_path'], name)
+    def save_checkpoint(self, checkpoint, name: str ='model.pth', verbose=0):
+
+        checkpoint_filepath = self.checkpoint_path / name
+        checkpoint_filepath.parent.mkdir(parents=True, exist_ok=True)
 
         torch.save(
             checkpoint,
             checkpoint_filepath
-            )
-        
+        )
+
         # Log checkpoint to MLflow
         mlflow.log_artifact(checkpoint_filepath, artifact_path="checkpoints")
-        
-        if verbose >0:
-            print(f'Checkpoint saved at epoch {checkpoint["epoch"]}, checkpoint_filepath: {checkpoint_filepath}')
 
-    def remove_checkpoint(self, name):
-        checkpoint_filepath = os.path.join(self.params['checkpoint_path'], name)
-        if os.path.exists(checkpoint_filepath):
-            os.remove(checkpoint_filepath)  # Fix: pass the filepath to os.remove()
+        if verbose > 0:
+            print(
+                f'Checkpoint saved at epoch {checkpoint["epoch"]}, checkpoint_filepath: {checkpoint_filepath}')
 
-    def train(self, train_data_loader, valid_data_loader, retrain=False):
+    def remove_checkpoint(self, 
+                          name: str #include .pth
+                          ):
+        checkpoint_filepath = self.checkpoint_path / name
+        if checkpoint_filepath.exists():
+            if checkpoint_filepath.is_file():
+                checkpoint_filepath.unlink(missing_ok=True)  # Removed `missing_ok` for compatibility
+            else:
+                shutil.rmtree(str(checkpoint_filepath))
+
+    def train(self, train_data_loader, valid_data_loader, retrain=False, epochs=100):
 
         # Move model to the specified device
-        self.model.to(self.params['device'])  # Fix: move the model to the specified device
+        # Fix: move the model to the specified device
+        self.model.to(self.device)
         # Calculate the total number of batches in the training data
         num_batches = len(train_data_loader)
 
         # Initialize lists to store loss metrics for training and validation
-        training_losses = [0 for _ in range(self.params['num_epochs'])]
-        training_losses_sensor = [0 for _ in range(self.params['num_epochs'])]
-        valid_losses = [0 for _ in range(self.params['num_epochs'])]
-        valid_losses_sensor = [0 for _ in range(self.params['num_epochs'])]
+        training_losses = [0 for _ in range(epochs)]
+        training_losses_sensor = [0 for _ in range(epochs)]
+        valid_losses = [0 for _ in range(epochs)]
+        valid_losses_sensor = [0 for _ in range(epochs)]
 
         # Initialize the best validation loss to infinity and other training
         # controls
@@ -135,11 +171,13 @@ class IMADSModelManager:
         start_epoch = 0
         checkpoint = None
         if not retrain:
-            checkpoint = self.load_checkpoint(self.params['checkpoint_name'])
+            checkpoint = self.load_checkpoint(f'{self.checkpoint_filename.name}.pth')
             if checkpoint:
                 print('Loaded checkpoint')
-                self.model.load_state_dict(checkpoint['model_state_dict'])  # Fix: use self.model.load_state_dict
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                # Fix: use self.model.load_state_dict
+                self.model.load_state_dict(checkpoint['model_state_dict'])
+                self.optimizer.load_state_dict(
+                    checkpoint['optimizer_state_dict'])
                 start_epoch = checkpoint['epoch'] + 1
                 training_losses = checkpoint['training_losses']
                 training_losses_sensor = checkpoint['training_losses_sensor']
@@ -148,16 +186,17 @@ class IMADSModelManager:
             else:
                 print('No checkpoint available, training from scratch')
         else:
-            self.remove_checkpoint(name=self.params['checkpoint_name'])
+            self.remove_checkpoint(name=self.checkpoint_filename)
             print('removed checkpoint, training from scratch')
 
         # Main training loop over specified number of epochs
-        for epoch in range(start_epoch, self.params['num_epochs']):
+        for epoch in range(start_epoch, epochs):
             self.model.train()  # Set the model to training mode
             training_loss_epoch = 0
-            multisensor = len(self.window_lengths)>1
+            multisensor = len(self.window_lengths) > 1
             if multisensor:
-                training_loss_epoch_sensor = np.zeros(len(self.model.window_lengths))
+                training_loss_epoch_sensor = np.zeros(
+                    len(self.model.window_lengths))
 
             # Loop over each batch from the data loader
             for batch_idx, (x_batch, _) in enumerate(train_data_loader):
@@ -169,7 +208,7 @@ class IMADSModelManager:
                 x_batch = torch.concat(
                     # Flatten and concatenate batch data
                     [x.flatten(1) for x in x_batch], axis=1)
-                
+
                 self.optimizer.zero_grad()  # Zero the gradients to prepare for backward pass
                 _, x_batch_estimate = self.model(x_batch)  # Forward pass
 
@@ -186,7 +225,8 @@ class IMADSModelManager:
                             torch.mean(single_sensor_vec) for single_sensor_vec in training_loss_batch_sensor]
 
                 if self.postprocess_pipeline:
-                    x_batch_estimate = self.postprocess_pipeline(x_batch_estimate)
+                    x_batch_estimate = self.postprocess_pipeline(
+                        x_batch_estimate)
 
                 # Calculate overall loss from the batch
                 loss = torch.mean(overall_loss(
@@ -215,9 +255,8 @@ class IMADSModelManager:
 
                 # Print training progress
                 print(
-                    f'Train Epoch [{epoch+1}/{self.params["num_epochs"]}] | Batch [{batch_idx+1}/{num_batches}] | '
+                    f'Train Epoch [{epoch+1}/{epochs}] | Batch [{batch_idx+1}/{num_batches}] | '
                     f'{percent_complete:.2f}% Complete | Avg Batch Loss: {avg_batch_loss:.4f}', end='\r')
-                
 
             # Append average losses after each epoch
             training_losses[epoch] = avg_batch_loss
@@ -227,16 +266,17 @@ class IMADSModelManager:
             if multisensor:
                 training_losses_sensor[epoch] = avg_batch_sensor_loss
                 for i, sensor_loss in enumerate(avg_batch_sensor_loss):
-                    mlflow.log_metric(f"training_loss_sensor_{i}", sensor_loss, step=epoch)
+                    mlflow.log_metric(
+                        f"training_loss_sensor_{i}", sensor_loss, step=epoch)
 
             # Evaluate model on validation data and track losses
             avg_batch_loss, avg_batch_sensor_loss = self.evaluate(
                 valid_data_loader)
             valid_losses[epoch] = avg_batch_loss
-            
+
             # Print validation results
             print(
-                f'\nValid Epoch [{epoch+1}/{self.params["num_epochs"]}] | Batch [{batch_idx+1}/{len(valid_data_loader)}] | '
+                f'\nValid Epoch [{epoch+1}/{epochs}] | Batch [{batch_idx+1}/{len(valid_data_loader)}] | '
                 f'{percent_complete:.2f}% Complete | Avg Batch Loss: {avg_batch_loss:.4f}')
             # Log validation metrics to MLflow
             mlflow.log_metric("validation_loss", avg_batch_loss, step=epoch)
@@ -246,36 +286,54 @@ class IMADSModelManager:
                 print(f'sensor losses {avg_batch_sensor_loss}')
                 print('\n')
                 for i, sensor_loss in enumerate(avg_batch_sensor_loss):
-                    mlflow.log_metric(f"validation_loss_sensor_{i}", sensor_loss, step=epoch)
+                    mlflow.log_metric(
+                        f"validation_loss_sensor_{i}", sensor_loss, step=epoch)
 
             # track model weights every n epochs
             if (epoch + 1) % self.save_after_n_epochs == 0:
-                checkpoint = self.format_checkpoint(epoch, self.model, self.optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor)
-                self.save_checkpoint(checkpoint=checkpoint, name= f'epoch{epoch}' + self.params['checkpoint_name'] , verbose=1)
+                checkpoint = self.format_checkpoint(
+                    epoch, self.model, self.optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor)
+                self.save_checkpoint(
+                    checkpoint=checkpoint, name=f'epoch{epoch}' + self.checkpoint_filename, verbose=1)
 
             if avg_batch_loss < self.best_valid_loss:
                 print(f'model improved valid loss = {avg_batch_loss}')
                 self.best_valid_loss = avg_batch_loss
                 self.best_model = self.model
-                self.best_model_checkpoint = self.format_checkpoint(epoch, self.model, self.optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor)
+                self.best_model_checkpoint = self.format_checkpoint(
+                    epoch, self.model, self.optimizer, training_losses, training_losses_sensor, valid_losses, valid_losses_sensor)
 
         # save best model only at the end of training
-        self.save_checkpoint(checkpoint=self.best_model_checkpoint, name=f'best_' + self.params['checkpoint_name'], verbose = 1)
-        print(f"saving best model in path: {self.params['ml_tracking']['model_path']}")
+        best_model_name = f'best_{self.checkpoint_filename.name}.pth'
+        self.remove_checkpoint(name=best_model_name)
+        self.save_checkpoint(checkpoint=self.best_model_checkpoint,
+                             name=best_model_name, verbose=1)
+        
+        # Log best model to MLflow
+        best_model_path = self.ml_tracking_path / self.ml_tracking_model_path
+        print(f"saving best model in path: {best_model_path}")
+
+        if best_model_path.exists():
+            shutil.rmtree(str(best_model_path))
         mlflow.pytorch.save_model(
-            path = self.params['ml_tracking']['model_path'],
-            pytorch_model=self.best_model)
+            path = best_model_path,
+            pytorch_model=self.best_model
+            )
 
         # Convert lists to numpy arrays for further processing if needed
         self.valid_losses_sensor = pd.DataFrame(valid_losses_sensor).values
-        self.training_losses_sensor = pd.DataFrame(training_losses_sensor).values
+        self.training_losses_sensor = pd.DataFrame(
+            training_losses_sensor).values
 
         # Load the best model state if one was saved
         try:
-            checkpoint = self.load_checkpoint('best_' + self.params['checkpoint_name'])  # Fix: load the best model checkpoint
+            # Fix: load the best model checkpoint
+            checkpoint = self.load_checkpoint(
+                f'best_{self.checkpoint_filename.name}.pth')
             if checkpoint:
                 self.model.load_state_dict(checkpoint['model_state_dict'])
-                self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                self.optimizer.load_state_dict(
+                    checkpoint['optimizer_state_dict'])
                 start_epoch = checkpoint['epoch'] + 1
         except:
             pass
@@ -362,7 +420,7 @@ class IMADSModelManager:
                     self.num_channels)).detach().cpu().numpy()
             sensor_losses_fusing.append(sensor_loss_batch.T)
 
-            # Get individual sensor losses using a utility function 
+            # Get individual sensor losses using a utility function
             sensor_loss_batch_individual = get_individual_losses(
                 self.model, self.sensors, self.window_lengths, self.num_channels, x_batch, self.criterion)
             sensor_losses_individual.append(sensor_loss_batch_individual.T)
@@ -381,8 +439,10 @@ class IMADSModelManager:
         predictions = np.concatenate(predictions, axis=0)
         embeddings = np.concatenate(embeddings, axis=0)
 
-        y = pd.concat([pd.DataFrame(yi) for yi in y], axis=0) # Flatten the list y
-        y['label'] = y['anomaly_label'].apply(lambda x: 'normal' if x =='normal' else 'anomaly')
+        y = pd.concat([pd.DataFrame(yi)
+                      for yi in y], axis=0)  # Flatten the list y
+        y['label'] = y['anomaly_label'].apply(
+            lambda x: 'normal' if x == 'normal' else 'anomaly')
 
         # Create DataFrame with sensor fusion anomaly scores and individual
         # sensor scores
@@ -397,8 +457,9 @@ class IMADSModelManager:
             np.concatenate(total_loss, axis=0))
 
         # Combine anomaly scores DataFrame with Y_test for analysis
-        Y_test = pd.concat([anomaly_scores_df.reset_index(drop=True), y.reset_index(drop=True)], axis=1)
-        
+        Y_test = pd.concat([anomaly_scores_df.reset_index(
+            drop=True), y.reset_index(drop=True)], axis=1)
+
         Y_test_grouped = group_by_segment_id(
             Y_test, anomaly_scores_df.columns, aggregation_type, verbose=0)
 
@@ -430,7 +491,8 @@ class IMADSModelManager:
         self.model.eval()
         for batch_idx, (x_batch, y_batch) in enumerate(data_loader):
             # Flatten and concatenate input data for processing
-            x_batch = torch.concat([x.flatten(1) for x in x_batch], axis=1).to(self.params['device'])
+            x_batch = torch.concat([x.flatten(1) for x in x_batch], axis=1).to(
+                self.device)
             labels.append(pd.DataFrame(y_batch))
 
             # Get model outputs including embeddings and predictions
@@ -472,13 +534,13 @@ class IMADSModelManager:
                 f'f_{sensor}' for sensor in self.sensors])
         anomaly_scores_df[[f's_{sensor}' for sensor in self.sensors]] = np.concatenate(
             sensor_losses_individual)
-        
+
         # Add total loss to the DataFrame
         anomaly_scores_df['total_loss'] = pd.Series(
             np.concatenate(total_loss, axis=0))
 
         # add labels
-        anomaly_scores_df = pd.concat([anomaly_scores_df, labels_df.reset_index(drop=True)], axis=1)
-
+        anomaly_scores_df = pd.concat(
+            [anomaly_scores_df, labels_df.reset_index(drop=True)], axis=1)
 
         return anomaly_scores_df, flattened_inputs, predictions, embeddings

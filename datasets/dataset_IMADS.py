@@ -120,12 +120,12 @@ class IMADSBaseDataset(Dataset):
         """
         # Check if the data folder already contains the necessary files
         required_files = [
-            data_folder / machine / 'train/attributes_normal_source_train.csv',
-            data_folder / machine / 'train/attributes_normal_target_train.csv',
-            data_folder / machine / 'test/attributes_normal_source_test.csv',
-            data_folder / machine / 'test/attributes_anomaly_source_test.csv',
-            data_folder / machine / 'test/attributes_normal_target_test.csv',
-            data_folder / machine / 'test/attributes_anomaly_target_test.csv'
+            data_folder / machine / 'train' / 'attributes_normal_source_train.csv',
+            data_folder / machine / 'train' / 'attributes_normal_target_train.csv',
+            data_folder / machine / 'test' / 'attributes_normal_source_test.csv',
+            data_folder / machine / 'test' / 'attributes_anomaly_source_test.csv',
+            data_folder / machine / 'test' / 'attributes_normal_target_test.csv',
+            data_folder / machine / 'test' / 'attributes_anomaly_target_test.csv'
         ]
         
         if all(file.exists() for file in required_files):
@@ -395,11 +395,11 @@ class IMADSDatasetTrain(IMADSBaseDataset):
 
     def __init__(self,
                  seed: int,
-                 data_folder: Path = Path('data'),
+                 data_folder: str = 'data',
                  sensors_enabled: list[str] = ['ism330dhcx_acc', 'ism330dhcx_gyro', 'imp23absu_mic'],
                  sensor_dict = None, 
                  label_names = None, 
-                 machine = 'BrushlessMotor', 
+                 machine: str = 'BrushlessMotor', 
                  window_size_ms: int = 100, 
                  device: str ='cpu',
                  transform_pipeline: object = None,
@@ -411,14 +411,23 @@ class IMADSDatasetTrain(IMADSBaseDataset):
         Parameters:
         X (list): List of numpy arrays, where each array contains data from a different sensor.
         """
+        self.seed = seed
+        self.data_folder = Path(data_folder)
+        self.sensors_enabled = sensors_enabled
+        self.sensor_dict = self.sensor_dict if sensor_dict is None else sensor_dict
+        self.label_names = self.label_names if label_names is None else label_names
         self.machine = machine
+        self.window_size_ms = window_size_ms
+        self.device = device
+        self.transform_pipeline = transform_pipeline
+        self.valid_size = valid_size
 
         # Initializations
-        self.input_folder = data_folder / Path(self.machine)
-        self.output_folder = data_folder / Path(self.machine) / Path('windowed')
+        self.input_folder  = self.data_folder / self.machine
+        self.output_folder = self.data_folder / self.machine / 'windowed'
 
-        super().check_or_get_data(machine, data_folder)
-        os.makedirs(self.output_folder, exist_ok=True)
+        super().check_or_get_data(machine, self.data_folder)
+        self.output_folder.mkdir(exist_ok=True, parents=True)
 
         # constants
         self.window_size_ts = pd.to_timedelta(f'{window_size_ms}ms')
@@ -510,7 +519,7 @@ class IMADSDatasetTest(IMADSBaseDataset):
     """
 
     def __init__(self,
-                 data_folder: Path = Path('data'),
+                 data_folder: str = 'data',
                  sensors_enabled: list[str] = ['all'], 
                  sensor_dict = None, 
                  label_names = None, 
@@ -525,14 +534,21 @@ class IMADSDatasetTest(IMADSBaseDataset):
         Parameters:
         X (list): List of numpy arrays, where each array contains data from a different sensor.
         """
+        self.data_folder = Path(data_folder)
+        self.sensors_enabled = sensors_enabled
+        self.sensor_dict = self.sensor_dict if sensor_dict is None else sensor_dict
+        self.label_names = self.label_names if label_names is None else label_names
         self.machine = machine
+        self.window_size_ms = window_size_ms
+        self.device = device
+        self.transform_pipeline = transform_pipeline
 
         # Initializations
-        self.input_folder = data_folder / Path(self.machine)
-        self.output_folder = data_folder / Path(self.machine) / Path('windowed')
+        self.input_folder = self.data_folder / Path(self.machine)
+        self.output_folder = self.data_folder / Path(self.machine) / Path('windowed')
 
-        super().check_or_get_data(machine, data_folder)
-        os.makedirs(self.output_folder, exist_ok=True)
+        super().check_or_get_data(machine, self.data_folder)
+        self.output_folder.mkdir(exist_ok=True, parents=True)
 
         # constants
         self.window_size_ts = pd.to_timedelta(f'{window_size_ms}ms')
@@ -577,6 +593,8 @@ class IMADSDatasetTest(IMADSBaseDataset):
         # create windows dataset if not present yet
         self.to_windows('test', metadata, self.sensor_dict, self.output_folder, self.window_size_ts, self.gyroscope_warm_up_time)
 
+        # update sensor_dict based on enabled_sensors
+        self.update_sensors_dict(sensor_dict, sensors_enabled)
         X, y = self.load_windows(
             path ='{}/test_dataset_window_{:.3f}s.h5'.format(
                 self.output_folder,

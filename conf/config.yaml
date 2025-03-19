@@ -1,0 +1,36 @@
+hydra:
+  job:
+    chdir: False # keep it set to False to avoid issues with relative paths
+
+ml_tracking:
+  path: 'mlruns'
+  model_path: 'best_model'
+
+machine: 'RoboticArm' # choose between BrushlessMotor and RoboticArm
+window_size_ms: 100 # milliseconds
+
+layer_dims: [2, 16]
+lr: 0.0001
+criterion: 'MSE' # Choose among MSE, MAE and MAPE, 'ME'
+batch_size: 1024
+num_epochs: 1
+patience: 3
+normalization: 'std_window' # ('std', 'min-max', 'std_window', or 'min-max_window')
+valid_size: 0.1
+seed: 1995
+data_folder: 'data/IMAD-DS'
+checkpoint_path: 'checkpoints'
+checkpoint_name: 'AE'
+results_folder: 'results'
+train: True
+retrain: False
+save_after_n_epochs: 10
+
+sensors_enabled:
+  ism330dhcx_acc: False # accelerometer
+  ism330dhcx_gyro: False # gyroscope
+  imp23absu_mic: True # microphone
+
+preprocess_pipeline:
+  pipeline_name: 'Normalize'  # Choose among 'Normalize', 'NormalizeAndAddPositionalEncodings'
+  # pos_enc_type: 'classic' # Comment if not required by pipeline - Choose among 'classic', 'linear'

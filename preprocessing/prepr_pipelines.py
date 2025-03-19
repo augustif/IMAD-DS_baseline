@@ -12,9 +12,18 @@ class Normalize:
 
 class NormaAndAddPosEnc:
 
-    def __init__(self, norm='std', device='cpu', pos_enc_type='classic'):
+    def __init__(self, norm='std', pos_enc_type='classic'):
         self.norm = norm
         self.pos_enc_type = pos_enc_type
+
+        # Get cpu, gpu or mps device for training.
+        device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
+        )
         self.device = device
         self.pos_enc = None
         
